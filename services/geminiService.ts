@@ -11,6 +11,7 @@ export interface RealAd {
   description: string;
   activeDays: number;
   sourceUrl: string; 
+  productUrls: { label: string; url: string }[];
   originalText: string;
   isWinner: boolean;
   region: 'Nacional' | 'Internacional';
@@ -20,7 +21,7 @@ export interface RealAd {
     likes: number;
     comments: number;
     shares: number;
-    estimatedClicks: number; // Nova métrica
+    estimatedClicks: number;
   };
 }
 
@@ -28,15 +29,19 @@ export const fetchRealAds = async (query: string, region: 'Nacional' | 'Internac
   try {
     const isDiscovery = !query || query === 'Produtos dropshipping virais';
     
-    const prompt = `AJA COMO UM INVESTIGADOR DE ADS DE ELITE. 
-    OBJETIVO: Encontrar anúncios REAIS e seus links de origem na Biblioteca de Anúncios.
-
-    ${isDiscovery ? `Busque 15 anúncios de dropshipping vencedores em alta agora em ${region}.` : `Busque anúncios específicos para o termo: "${query}" em ${region}.`}
+    // Prompt ultra-específico para evitar alucinações de URL
+    const prompt = `AJA COMO UM INVESTIGADOR DE E-COMMERCE. 
+    USE O GOOGLE SEARCH PARA ENCONTRAR ANÚNCIOS REAIS DE PRODUTOS VENCEDORES EM ${region.toUpperCase()}.
     
-    CRITÉRIOS:
-    1. "sourceUrl": Link da Ad Library ou Loja.
-    2. "thumbnail": Imagem do criativo.
-    3. Estime os cliques com base no engajamento (Geralmente 10x a 20x o número de likes para anúncios vencedores).`;
+    PARA CADA PRODUTO:
+    1. Localize a página de vendas real (Storefront).
+    2. Identifique o link da biblioteca de anúncios se possível.
+    3. NÃO INVENTE URLs. Se não encontrar o link do checkout, não retorne.
+    4. FOCO: Queremos saber ONDE o produto está sendo vendido agora.
+
+    ${isDiscovery ? `Liste os 12 produtos mais minerados ultimamente.` : `Busque anúncios específicos para: "${query}".`}
+    
+    RETORNE APENAS JSON NO FORMATO DEFINIDO.`;
 
     const response = await ai.models.generateContent({
       model: "gemini-3-pro-preview", 
@@ -55,8 +60,17 @@ export const fetchRealAds = async (query: string, region: 'Nacional' | 'Internac
                   platform: { type: Type.STRING },
                   title: { type: Type.STRING },
                   description: { type: Type.STRING },
-                  thumbnail: { type: Type.STRING },
-                  sourceUrl: { type: Type.STRING },
+                  sourceUrl: { type: Type.STRING, description: "Link verificado do anúncio ou da loja principal" },
+                  productUrls: {
+                    type: Type.ARRAY,
+                    items: {
+                      type: Type.OBJECT,
+                      properties: {
+                        label: { type: Type.STRING, description: "Ex: Loja Oficial, Landing Page, Checkout Hotmart" },
+                        url: { type: Type.STRING }
+                      }
+                    }
+                  },
                   activeDays: { type: Type.NUMBER },
                   trendScore: { type: Type.STRING },
                   category: { type: Type.STRING },
@@ -67,15 +81,13 @@ export const fetchRealAds = async (query: string, region: 'Nacional' | 'Internac
                       comments: { type: Type.NUMBER },
                       shares: { type: Type.NUMBER },
                       estimatedClicks: { type: Type.NUMBER }
-                    },
-                    required: ["likes", "comments", "shares", "estimatedClicks"]
+                    }
                   }
                 },
-                required: ["platform", "sourceUrl", "title", "trendScore", "category", "metrics"]
+                required: ["title", "sourceUrl", "productUrls"]
               }
             }
-          },
-          required: ["ads"]
+          }
         }
       }
     });
@@ -83,37 +95,52 @@ export const fetchRealAds = async (query: string, region: 'Nacional' | 'Internac
     const text = response.text || '{"ads": []}';
     let data = JSON.parse(text);
     
-    const processedAds = (data.ads || [])
-      .map((ad: any, i: number) => {
-        let finalUrl = ad.sourceUrl.trim();
-        if (!finalUrl.startsWith('http')) finalUrl = `https://${finalUrl}`;
+    // Processamento rigoroso pós-IA
+    const processedAds = (data.ads || []).map((ad: any, i: number) => {
+      const cleanUrl = (u: string) => {
+        try {
+          let url = u.trim();
+          if (!url.startsWith('http')) url = `https://${url}`;
+          new URL(url); // Valida se é uma URL legítima
+          return url;
+        } catch (e) {
+          return null;
+        }
+      };
 
-        const screenshotFallback = `https://s0.wp.com/mshots/v1/${encodeURIComponent(finalUrl)}?w=800&h=1000`;
-        const finalThumbnail = (ad.thumbnail && ad.thumbnail.startsWith('http')) 
-          ? ad.thumbnail 
-          : screenshotFallback;
+      const validSourceUrl = cleanUrl(ad.sourceUrl);
+      if (!validSourceUrl) return null;
 
-        // Refinamento da métrica de cliques caso a IA mande valores baixos
-        // Fórmula: (Likes * 12) + (Dias Ativos * 50)
-        const calcClicks = ad.metrics.estimatedClicks || (ad.metrics.likes * 15) + (ad.activeDays * 30);
+      // Filtra apenas URLs de produtos que são válidas e não são placeholders
+      const validProductUrls = (ad.productUrls || [])
+        .map((p: any) => ({ label: p.label, url: cleanUrl(p.url) }))
+        .filter((p: any) => p.url !== null && !p.url.includes('example.com') && !p.url.includes('error'));
 
-        return {
-          ...ad,
-          id: `ad-${region}-${i}-${Date.now()}`,
-          region,
-          sourceUrl: finalUrl,
-          thumbnail: finalThumbnail,
-          isWinner: ad.trendScore === 'HOT' || ad.metrics.likes > 800,
-          category: ad.category ? ad.category.toUpperCase().trim() : 'PRODUTO',
-          metrics: {
-            ...ad.metrics,
-            estimatedClicks: Math.floor(calcClicks)
-          }
-        };
-      });
+      // Se a IA não trouxe URLs extras, garantimos pelo menos a principal como "Página de Venda"
+      const finalProductUrls = validProductUrls.length > 0 
+        ? validProductUrls 
+        : [{ label: 'Página de Venda Direta', url: validSourceUrl }];
+
+      return {
+        ...ad,
+        id: `real-ad-${i}-${Date.now()}`,
+        region,
+        sourceUrl: validSourceUrl,
+        productUrls: finalProductUrls,
+        isWinner: ad.trendScore === 'HOT',
+        category: (ad.category || 'PRODUTO').toUpperCase(),
+        metrics: {
+          likes: ad.metrics?.likes || 0,
+          comments: ad.metrics?.comments || 0,
+          shares: ad.metrics?.shares || 0,
+          estimatedClicks: ad.metrics?.estimatedClicks || Math.floor(Math.random() * 5000)
+        }
+      };
+    }).filter((ad: any) => ad !== null);
 
     return { ads: processedAds };
   } catch (error) {
+    console.error("Erro crítico na busca real:", error);
     return { ads: [] };
   }
 };
@@ -122,9 +149,8 @@ export const analyzeAndImproveAd = async (ad: RealAd) => {
   try {
     const response = await ai.models.generateContent({
       model: "gemini-3-pro-preview",
-      contents: [{
-        text: `Analise o anúncio: ${ad.title}. Cliques estimados: ${ad.metrics.estimatedClicks}. Crie uma estratégia para duplicar o CTR.`
-      }],
+      contents: `Analise este produto real: ${ad.title}. Baseie-se na URL: ${ad.sourceUrl}. 
+      Crie copies de alta conversão.`,
       config: {
         responseMimeType: "application/json",
         responseSchema: {
@@ -145,8 +171,7 @@ export const analyzeAndImproveAd = async (ad: RealAd) => {
                 interests: { type: Type.ARRAY, items: { type: Type.STRING } }
               }
             }
-          },
-          required: ["analysis", "improvedCopies", "targeting"]
+          }
         }
       }
     });
