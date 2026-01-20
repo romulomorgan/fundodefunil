@@ -1,0 +1,9 @@
+{
+  "name": "SpyEdge - Real Ad Intelligence",
+  "description": "Plataforma de espionagem de anúncios com dados 100% reais via Google Search Grounding e engenharia reversa assistida por IA.",
+  "requestFramePermissions": [
+    "camera",
+    "microphone",
+    "geolocation"
+  ]
+}
